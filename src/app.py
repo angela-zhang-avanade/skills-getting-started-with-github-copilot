@@ -8,19 +8,34 @@ for extracurricular activities at Mergington High School.
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+import json
 import os
 from pathlib import Path
+
+
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
-app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
-          "static")), name="static")
+app.mount(
+    "/static",
+    NoCacheStaticFiles(directory=os.path.join(Path(__file__).parent, "static")),
+    name="static",
+)
 
-# In-memory activity database
-activities = {
+# Activity database stored on disk so changes survive refreshes and restarts
+DATA_FILE = Path(__file__).with_name("activities.json")
+
+DEFAULT_ACTIVITIES = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -78,9 +93,30 @@ activities = {
 }
 
 
+def load_activities():
+    if DATA_FILE.exists():
+        with DATA_FILE.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    save_activities(DEFAULT_ACTIVITIES)
+    return DEFAULT_ACTIVITIES
+
+
+def save_activities(data):
+    with DATA_FILE.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+activities = load_activities()
+
+
 @app.get("/")
 def root():
-    return RedirectResponse(url="/static/index.html")
+    response = RedirectResponse(url="/static/index.html")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.get("/activities")
@@ -101,7 +137,24 @@ def signup_for_activity(activity_name: str, email: str):
     # Validate student is not already signed up
     if email in activity["participants"]:
         raise HTTPException(status_code=400, detail="Student already signed up for this activity")
-    
+
     # Add student
     activity["participants"].append(email)
+    save_activities(activities)
     return {"message": f"Signed up {email} for {activity_name}"}
+
+
+@app.delete("/activities/{activity_name}/signup")
+def unregister_for_activity(activity_name: str, email: str):
+    """Remove a student from an activity"""
+    if activity_name not in activities:
+        raise HTTPException(status_code=404, detail="Activity not found")
+
+    activity = activities[activity_name]
+
+    if email not in activity["participants"]:
+        raise HTTPException(status_code=404, detail="Participant not found")
+
+    activity["participants"].remove(email)
+    save_activities(activities)
+    return {"message": f"Removed {email} from {activity_name}"}
